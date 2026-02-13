@@ -19,6 +19,45 @@ function generateLicenseKey() {
   return `GG-${part(4)}-${part(4)}`; // ex: GG-G123-1H41
 }
 
+app.post("/api/admin/licenses/create", async (req, res) => {
+  // Enkel “admin key” skydd så ingen annan kan skapa licenser
+  const adminKey = req.headers["x-admin-key"];
+  if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+  }
+
+  const { expires_at } = req.body; // valfritt
+
+  // Försök några gånger ifall collision (väldigt ovanligt, men safe)
+  for (let i = 0; i < 5; i++) {
+    const license_key = generateLicenseKey();
+
+    const { data, error } = await supabase
+      .from("licenses")
+      .insert([
+        {
+          license_key,
+          status: "ACTIVE",
+          expires_at: expires_at ?? null,
+          hwid: null,
+        },
+      ])
+      .select("*")
+      .single();
+
+    if (!error && data) {
+      return res.json({ ok: true, license: data });
+    }
+
+    // om unique collision -> loopa igen, annars fail
+    if (!String(error?.message || "").toLowerCase().includes("duplicate")) {
+      return res.status(500).json({ ok: false, error: "DB_ERROR", details: error?.message });
+    }
+  }
+
+  return res.status(500).json({ ok: false, error: "FAILED_TO_GENERATE_UNIQUE_KEY" });
+});
+
 
 
 // health check
