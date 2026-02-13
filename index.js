@@ -12,6 +12,15 @@ const supabase = createClient(
 
 const LICENSE_SECRET = process.env.LICENSE_SECRET;
 
+function generateLicenseKey() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const part = (n) =>
+    Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `GG-${part(4)}-${part(4)}`; // ex: GG-G123-1H41
+}
+
+
+
 // health check
 app.get("/", (req, res) => res.send("OK"));
 
