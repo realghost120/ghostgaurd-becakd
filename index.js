@@ -5,6 +5,10 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
+app.use(cors());           // ✅ tillåt ALLA origins (så panelen funkar)
+app.use(express.json());
+
+
 /* ============================= */
 /* ======= MIDDLEWARE ========== */
 /* ============================= */
