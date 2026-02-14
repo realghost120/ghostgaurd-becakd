@@ -5,59 +5,33 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
-const ALLOWED_ORIGINS = [
-  "https://ghostguardd.netlify.app", // din Netlify site
-  "http://localhost:3000",
-  "http://localhost:5173",
-];
-
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // Postman/curl
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS_BLOCKED: " + origin), false);
-  },
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
-}));
-
-app.options("*", cors()); // preflight
-app.use(express.json());
-
-
 /* ============================= */
-/* ========= CONFIG ============ */
+/* ========= CORS + JSON ======= */
 /* ============================= */
 
 const ALLOWED_ORIGINS = new Set([
-  "https://ghostguardd.netlify.app", // din Netlify (OBS dubbel-d i ghostguardd)
+  "https://ghostguardd.netlify.app", // din Netlify
   "http://localhost:3000",
   "http://localhost:5173",
 ]);
 
-/* ============================= */
-/* ========= MIDDLEWARE ======== */
-/* ============================= */
-
-// CORS först (innan routes)
 app.use(
   cors({
     origin: (origin, cb) => {
       // Tillåt requests utan Origin (curl/postman)
       if (!origin) return cb(null, true);
 
+      // Tillåt bara whitelisted origins
       if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
 
-      // Blocka andra origins
       return cb(new Error("CORS_BLOCKED: " + origin), false);
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
   })
 );
 
-// Preflight MÅSTE svara 204/200
+// Preflight
 app.options("*", cors());
 
 // JSON body
@@ -104,7 +78,7 @@ app.get("/", (req, res) => res.send("GhostGuard Backend OK"));
 /** PUBLIC: verify license */
 app.post("/api/license/verify", async (req, res) => {
   try {
-    const { license_key, hwid } = req.body;
+    const { license_key, hwid } = req.body || {};
 
     if (!license_key) {
       return res.status(400).json({ valid: false, reason: "MISSING_KEY" });
@@ -118,16 +92,21 @@ app.post("/api/license/verify", async (req, res) => {
 
     if (error || !lic) return res.json({ valid: false, reason: "NOT_FOUND" });
     if (lic.status !== "ACTIVE") return res.json({ valid: false, reason: lic.status });
-    if (lic.expires_at && new Date(lic.expires_at) < new Date())
+
+    if (lic.expires_at && new Date(lic.expires_at) < new Date()) {
       return res.json({ valid: false, reason: "EXPIRED" });
+    }
 
     // HWID bind
     if (lic.hwid) {
-      if (hwid && lic.hwid !== hwid) return res.json({ valid: false, reason: "HWID_MISMATCH" });
+      if (hwid && lic.hwid !== hwid) {
+        return res.json({ valid: false, reason: "HWID_MISMATCH" });
+      }
     } else if (hwid) {
       await supabase.from("licenses").update({ hwid }).eq("id", lic.id);
     }
 
+    // last_seen
     await supabase
       .from("licenses")
       .update({ last_seen: new Date().toISOString() })
@@ -146,7 +125,7 @@ app.post("/api/license/verify", async (req, res) => {
       .digest("hex");
 
     return res.json({ valid: true, payload, signature });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ valid: false, reason: "SERVER_ERROR" });
   }
 });
@@ -174,7 +153,7 @@ app.post("/admin/create-license", async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true, license_key });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ success: false, error: "SERVER_ERROR" });
   }
 });
@@ -192,7 +171,7 @@ app.get("/admin/licenses", async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true, data: data || [] });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ success: false, error: "SERVER_ERROR" });
   }
 });
@@ -203,8 +182,9 @@ app.post("/admin/toggle-license", async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { license_key, status } = req.body || {};
-    if (!license_key || !status)
+    if (!license_key || !status) {
       return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+    }
 
     const { error } = await supabase
       .from("licenses")
@@ -214,7 +194,7 @@ app.post("/admin/toggle-license", async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ success: false, error: "SERVER_ERROR" });
   }
 });
@@ -225,8 +205,9 @@ app.post("/admin/create-customer", async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { username, password, license_key } = req.body || {};
-    if (!username || !password || !license_key)
+    if (!username || !password || !license_key) {
       return res.status(400).json({ success: false, error: "Missing fields" });
+    }
 
     const hash = crypto.createHash("sha256").update(password).digest("hex");
 
@@ -237,14 +218,14 @@ app.post("/admin/create-customer", async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ success: false, error: "SERVER_ERROR" });
   }
 });
 
 /** PUBLIC: customer login */
-app.post("/api/login", async (req, res) => {
-  try {
+app.post("/api/login", async (req, res) => {  
+  try { 
     const { username, password } = req.body || {};
     if (!username || !password) return res.json({ success: false });
 
