@@ -246,6 +246,103 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+
+
+/* ============================= */
+/* ===== CUSTOMER DASHBOARD ==== */
+/* ============================= */
+
+// Hämta dashboard-data
+app.post("/customer/dashboard", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+
+    if (!token) {
+      return res.status(401).json({ success: false });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (userError || !user) {
+      return res.status(401).json({ success: false });
+    }
+
+    const { data: lic, error: licError } = await supabase
+      .from("licenses")
+      .select("*")
+      .eq("license_key", user.license_key)
+      .single();
+
+    if (licError || !lic) {
+      return res.status(404).json({ success: false });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        license_key: lic.license_key,
+        status: lic.status,
+        expires_at: lic.expires_at
+      }
+    });
+
+  } catch {
+    return res.status(500).json({ success: false });
+  }
+});
+
+
+// Toggle license (start/stop)
+app.post("/customer/toggle", async (req, res) => {
+  try {
+    const { token, status } = req.body || {};
+
+    if (!token || !status) {
+      return res.status(400).json({ success: false });
+    }
+
+    const { data: user } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (!user) {
+      return res.status(401).json({ success: false });
+    }
+
+    const { error } = await supabase
+      .from("licenses")
+      .update({ status })
+      .eq("license_key", user.license_key);
+
+    if (error) {
+      return res.status(500).json({ success: false });
+    }
+
+    return res.json({ success: true });
+
+  } catch {
+    return res.status(500).json({ success: false });
+  }
+});
+
+
+// Live players (mock – du kan koppla FiveM senare)
+app.post("/customer/live-players", async (req, res) => {
+  return res.json({
+    success: true,
+    players: []
+  });
+});
+
+
+
+
 /* ============================= */
 
 const port = process.env.PORT || 3000;
