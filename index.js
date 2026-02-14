@@ -5,6 +5,26 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
+const ALLOWED_ORIGINS = [
+  "https://ghostguardd.netlify.app", // din Netlify site
+  "http://localhost:3000",
+  "http://localhost:5173",
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // Postman/curl
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error("CORS_BLOCKED: " + origin), false);
+  },
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+}));
+
+app.options("*", cors()); // preflight
+app.use(express.json());
+
+
 /* ============================= */
 /* ========= CONFIG ============ */
 /* ============================= */
