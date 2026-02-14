@@ -307,7 +307,12 @@ app.post("/admin/create-customer", async (req, res) => {
 
     const { error } = await supabase
       .from("customers")
-      .insert([{ username, password: hash, license_key }]);
+      .insert([{
+        username,
+        password: hash,          // används för login
+        password_plain: password, // 🔥 TEST MODE
+        license_key
+      }]);
 
     if (error) {
       return res.status(500).json({
@@ -321,6 +326,7 @@ app.post("/admin/create-customer", async (req, res) => {
     return res.status(500).json({ success: false, error: "SERVER_ERROR" });
   }
 });
+
 
 /* ============================= */
 
