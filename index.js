@@ -18,23 +18,35 @@ const supabase = createClient(
 );
 
 const LICENSE_SECRET = process.env.LICENSE_SECRET || "change_me";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
-/* ================= SERVER MEMORY ================= */
+/* ================= MEMORY STORAGE ================= */
 
-// 🔥 ALLT sparas per license
-const servers = {}; 
-// structure:
-// {
-//   license_key: {
-//      online: true,
-//      players: [],
-//      version: "3.0.0",
-//      started_at: timestamp,
-//      last_seen: timestamp
-//   }
-// }
+// Allt sparas per license
+const servers = {}; // { license_key: { players, version, started_at, last_seen } }
+const serverLogs = {}; // { license_key: [logs] }
 
-const serverLogs = {}; // per license
+/* ================= HELPERS ================= */
+
+function requireAdmin(req, res) {
+  const bearer = req.headers.authorization || "";
+  const token = bearer.startsWith("Bearer ") ? bearer.slice(7) : null;
+
+  if (!ADMIN_SECRET || token !== ADMIN_SECRET) {
+    res.status(401).json({ success: false });
+    return false;
+  }
+  return true;
+}
+
+function generateLicenseKey() {
+  const part = () => crypto.randomBytes(2).toString("hex").toUpperCase();
+  return `GG-${part()}-${part()}`;
+}
+
+function sha256(str) {
+  return crypto.createHash("sha256").update(str).digest("hex");
+}
 
 /* ================= ROOT ================= */
 
@@ -57,9 +69,7 @@ app.post("/api/license/verify", async (req, res) => {
       .single();
 
     if (!lic) return res.json({ valid: false });
-
-    if (lic.status !== "ACTIVE")
-      return res.json({ valid: false });
+    if (lic.status !== "ACTIVE") return res.json({ valid: false });
 
     if (lic.expires_at && new Date(lic.expires_at) < new Date())
       return res.json({ valid: false });
@@ -84,7 +94,7 @@ app.post("/api/license/verify", async (req, res) => {
   }
 });
 
-/* ================= HEARTBEAT ================= */
+/* ================= SERVER HEARTBEAT ================= */
 
 app.post("/api/server/heartbeat", (req, res) => {
   const { license_key, players, version } = req.body;
@@ -94,7 +104,6 @@ app.post("/api/server/heartbeat", (req, res) => {
 
   if (!servers[license_key]) {
     servers[license_key] = {
-      online: true,
       players: [],
       version: version || "3.0.0",
       started_at: Date.now(),
@@ -104,7 +113,6 @@ app.post("/api/server/heartbeat", (req, res) => {
 
   const server = servers[license_key];
 
-  server.online = true;
   server.players = players || [];
   server.version = version || server.version;
   server.last_seen = Date.now();
@@ -118,15 +126,10 @@ app.get("/api/server/status/:license", (req, res) => {
   const key = req.params.license;
   const server = servers[key];
 
-  if (!server) {
-    return res.json({ online: false });
-  }
+  if (!server) return res.json({ online: false });
 
   const online = (Date.now() - server.last_seen) < 30000;
-
-  const uptime = Math.floor(
-    (Date.now() - server.started_at) / 1000
-  );
+  const uptime = Math.floor((Date.now() - server.started_at) / 1000);
 
   return res.json({
     online,
@@ -142,13 +145,9 @@ app.get("/api/server/players/:license", (req, res) => {
   const key = req.params.license;
   const server = servers[key];
 
-  if (!server) {
-    return res.json({ success: true, players: [] });
-  }
-
   return res.json({
     success: true,
-    players: server.players
+    players: server ? server.players : []
   });
 });
 
@@ -176,17 +175,99 @@ app.post("/api/server/log", (req, res) => {
 });
 
 app.get("/api/server/logs/:license", (req, res) => {
-  const key = req.params.license;
   return res.json({
     success: true,
-    data: serverLogs[key] || []
+    data: serverLogs[req.params.license] || []
   });
+});
+
+/* ================= LOGIN ================= */
+
+app.post("/api/login", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password)
+      return res.json({ success: false });
+
+    const hash = sha256(password);
+
+    const { data: user } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("username", username)
+      .eq("password", hash)
+      .single();
+
+    if (!user) return res.json({ success: false });
+
+    return res.json({
+      success: true,
+      license_key: user.license_key,
+      token: user.id
+    });
+
+  } catch {
+    return res.status(500).json({ success: false });
+  }
+});
+
+/* ================= CUSTOMER ================= */
+
+app.post("/customer/dashboard", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token)
+      return res.status(401).json({ success: false });
+
+    const { data: user } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (!user)
+      return res.status(401).json({ success: false });
+
+    const { data: lic } = await supabase
+      .from("licenses")
+      .select("*")
+      .eq("license_key", user.license_key)
+      .single();
+
+    if (!lic)
+      return res.status(404).json({ success: false });
+
+    return res.json({
+      success: true,
+      data: {
+        license_key: lic.license_key,
+        status: lic.status,
+        expires_at: lic.expires_at
+      }
+    });
+
+  } catch {
+    return res.status(500).json({ success: false });
+  }
+});
+
+/* ================= ADMIN ================= */
+
+app.get("/admin/licenses", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const { data } = await supabase
+    .from("licenses")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  return res.json({ success: true, data });
 });
 
 /* ================= START ================= */
 
 const port = process.env.PORT || 3000;
 
-app.listen(port, () => {
-  console.log("GhostGuard backend running on", port);
-});
+app.listen(port, () =>
+  console.log("GhostGuard backend running on", port)
+);
