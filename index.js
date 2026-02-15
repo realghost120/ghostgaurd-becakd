@@ -117,28 +117,24 @@ app.post("/api/license/verify", async (req, res) => {
 const serverState = {};
 
 // ===== HEARTBEAT ENDPOINT =====
+let livePlayers = [];
+
 app.post("/api/server/heartbeat", async (req, res) => {
-  try {
-    const { license_key, players, uptime, version } = req.body;
+  const { license_key, players, version } = req.body;
 
-    if (!license_key) {
-      return res.status(400).json({ success: false });
-    }
-
-    serverState[license_key] = {
-      players: players || 0,
-      uptime: uptime || 0,
-      version: version || "unknown",
-      last_seen: Date.now()
-    };
-
-    return res.json({ success: true });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false });
+  if (!license_key) {
+    return res.status(400).json({ success:false });
   }
+
+  livePlayers = players || [];
+
+  return res.json({ success:true });
 });
+
+app.get("/api/server/players/:license", async (req, res) => {
+  return res.json({ success:true, players: livePlayers });
+});
+
 
 app.get("/api/server/status/:license", (req, res) => {
   const license = req.params.license;
