@@ -185,6 +185,45 @@ app.post("/customer/dashboard", async (req, res) => {
   }
 });
 
+
+app.post("/customer/toggle", async (req, res) => {
+  try {
+    const { token, status } = req.body;
+
+    if (!token || !status) {
+      return res.status(400).json({ success: false });
+    }
+
+    const { data: user } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (!user) {
+      return res.status(401).json({ success: false });
+    }
+
+    const { error } = await supabase
+      .from("licenses")
+      .update({ status })
+      .eq("license_key", user.license_key);
+
+    if (error) {
+      return res.status(500).json({ success: false });
+    }
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+
+
+
 /* ================= ADMIN ================= */
 
 app.post("/admin/create-license", async (req, res) => {
