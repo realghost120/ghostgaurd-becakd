@@ -294,6 +294,35 @@ app.post("/admin/toggle-license", async (req, res) => {
   }
 });
 
+app.get("/admin/licenses", async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return;
+
+    const { data, error } = await supabase
+      .from("licenses")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: data || []
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR"
+    });
+  }
+});
 
 
 
