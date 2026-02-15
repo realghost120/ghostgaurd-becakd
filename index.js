@@ -5,27 +5,12 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
-/* ============================= */
-/* ========= CORS + JSON ======= */
-/* ============================= */
-/**
- * Tillåt ALLA origins (enklast när Netlify/Render bråkar).
- * Viktigt: preflight måste använda samma cors-options.
- */
-const corsOptions = {
-  origin: true,
-  credentials: false,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
+/* ================= CORS ================= */
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // preflight
+app.use(cors());
 app.use(express.json());
 
-/* ============================= */
-/* ========= SUPABASE ========== */
-/* ============================= */
+/* ================= SUPABASE ================= */
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -35,9 +20,7 @@ const supabase = createClient(
 const LICENSE_SECRET = process.env.LICENSE_SECRET || "change_me";
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
-/* ============================= */
-/* ========= HELPERS =========== */
-/* ============================= */
+/* ================= HELPERS ================= */
 
 function requireAdmin(req, res) {
   const bearer = req.headers.authorization || "";
@@ -50,7 +33,6 @@ function requireAdmin(req, res) {
   return true;
 }
 
-// GG-XXXX-XXXX (snyggt)
 function generateLicenseKey() {
   const part = () => crypto.randomBytes(2).toString("hex").toUpperCase();
   return `GG-${part()}-${part()}`;
@@ -60,54 +42,45 @@ function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
 }
 
-/* ============================= */
-/* ========= ROOT ============== */
-/* ============================= */
+/* ================= ROOT ================= */
 
-app.get("/", (req, res) => res.send("GhostGuard Backend OK"));
+app.get("/", (req, res) => {
+  res.send("GhostGuard Backend OK");
+});
 
-/* ============================= */
-/* ========= PUBLIC API ======== */
-/* ============================= */
+/* ================= LICENSE VERIFY ================= */
 
-local url = Config.BackendURL .. "/api/license/verify"
+app.post("/api/license/verify", async (req, res) => {
+  try {
+    const { license_key, hwid } = req.body;
 
-local data = {
-    license_key = Config.LicenseKey,
-    hwid = "server-identifier-here"
-}
+    if (!license_key) {
+      return res.status(400).json({ valid: false, reason: "MISSING_KEY" });
+    }
 
-PerformHttpRequest(url, function(err, text, headers)
-    print("HTTP Status:", err)
-    print("Response:", text)
+    const { data: lic, error } = await supabase
+      .from("licenses")
+      .select("*")
+      .eq("license_key", license_key)
+      .single();
 
-    if err ~= 200 then
-        print("[GhostGuard] License offline")
-        return
-    end
+    if (error || !lic)
+      return res.json({ valid: false, reason: "NOT_FOUND" });
 
-    local response = json.decode(text)
+    if (lic.status !== "ACTIVE")
+      return res.json({ valid: false, reason: lic.status });
 
-    if response and response.valid then
-        print("[GhostGuard] License: ACTIVE ✔")
-    else
-        print("[GhostGuard] License invalid:", response and response.reason or "UNKNOWN")
-        StopResource(GetCurrentResourceName())
-    end
-
-end, "POST", json.encode(data), {
-    ["Content-Type"] = "application/json"
-})
-
+    if (lic.expires_at && new Date(lic.expires_at) < new Date())
+      return res.json({ valid: false, reason: "EXPIRED" });
 
     // HWID bind
     if (lic.hwid) {
-      if (hwid && lic.hwid !== hwid) return res.json({ valid: false, reason: "HWID_MISMATCH" });
+      if (hwid && lic.hwid !== hwid)
+        return res.json({ valid: false, reason: "HWID_MISMATCH" });
     } else if (hwid) {
       await supabase.from("licenses").update({ hwid }).eq("id", lic.id);
     }
 
-    // last_seen
     await supabase
       .from("licenses")
       .update({ last_seen: new Date().toISOString() })
@@ -119,6 +92,7 @@ end, "POST", json.encode(data), {
       expires_at: lic.expires_at,
       issued_at: Date.now(),
     };
+
     const payload = JSON.stringify(payloadObj);
 
     const signature = crypto
@@ -126,23 +100,25 @@ end, "POST", json.encode(data), {
       .update(payload)
       .digest("hex");
 
-    return res.json({ valid: true, payload, signature });
-  } catch {
+    return res.json({
+      valid: true,
+      payload,
+      signature,
+    });
+
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ valid: false, reason: "SERVER_ERROR" });
   }
 });
 
-/* ============================= */
-/* ========= LOGIN ============= */
-/* ============================= */
-/**
- * Frontend ska posta hit: /api/login
- * Returnerar token = user.id (som dashboard använder).
- */
+/* ================= LOGIN ================= */
+
 app.post("/api/login", async (req, res) => {
   try {
-    const { username, password } = req.body || {};
-    if (!username || !password) return res.json({ success: false });
+    const { username, password } = req.body;
+    if (!username || !password)
+      return res.json({ success: false });
 
     const hash = sha256(password);
 
@@ -153,60 +129,28 @@ app.post("/api/login", async (req, res) => {
       .eq("password", hash)
       .single();
 
-    if (error || !user) return res.json({ success: false });
+    if (error || !user)
+      return res.json({ success: false });
 
     return res.json({
       success: true,
-      license_key: user.license_key,
-      token: user.id, // viktigt för /customer/dashboard osv
+      token: user.id,
+      license_key: user.license_key
     });
-  } catch {
+
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ success: false });
   }
 });
 
-/* ============================= */
-/* ===== CUSTOMER DASHBOARD ==== */
-/* ============================= */
+/* ================= CUSTOMER DASHBOARD ================= */
 
 app.post("/customer/dashboard", async (req, res) => {
   try {
-    const { token } = req.body || {};
-    if (!token) return res.status(401).json({ success: false });
-
-    const { data: user, error: userErr } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
-
-    if (userErr || !user) return res.status(401).json({ success: false });
-
-    const { data: lic, error: licErr } = await supabase
-      .from("licenses")
-      .select("*")
-      .eq("license_key", user.license_key)
-      .single();
-
-    if (licErr || !lic) return res.status(404).json({ success: false });
-
-    return res.json({
-      success: true,
-      data: {
-        license_key: lic.license_key,
-        status: lic.status,
-        expires_at: lic.expires_at,
-      },
-    });
-  } catch {
-    return res.status(500).json({ success: false });
-  }
-});
-
-app.post("/customer/toggle", async (req, res) => {
-  try {
-    const { token, status } = req.body || {};
-    if (!token || !status) return res.status(400).json({ success: false });
+    const { token } = req.body;
+    if (!token)
+      return res.status(401).json({ success: false });
 
     const { data: user } = await supabase
       .from("customers")
@@ -214,29 +158,34 @@ app.post("/customer/toggle", async (req, res) => {
       .eq("id", token)
       .single();
 
-    if (!user) return res.status(401).json({ success: false });
+    if (!user)
+      return res.status(401).json({ success: false });
 
-    const { error } = await supabase
+    const { data: lic } = await supabase
       .from("licenses")
-      .update({ status })
-      .eq("license_key", user.license_key);
+      .select("*")
+      .eq("license_key", user.license_key)
+      .single();
 
-    if (error) return res.status(500).json({ success: false });
+    if (!lic)
+      return res.status(404).json({ success: false });
 
-    return res.json({ success: true });
-  } catch {
+    return res.json({
+      success: true,
+      data: {
+        license_key: lic.license_key,
+        status: lic.status,
+        expires_at: lic.expires_at
+      }
+    });
+
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ success: false });
   }
 });
 
-// (mock) live players
-app.post("/customer/live-players", async (_req, res) => {
-  return res.json({ success: true, players: [] });
-});
-
-/* ============================= */
-/* ========= ADMIN API ========= */
-/* ============================= */
+/* ================= ADMIN ================= */
 
 app.post("/admin/create-license", async (req, res) => {
   try {
@@ -254,91 +203,24 @@ app.post("/admin/create-license", async (req, res) => {
     const license_key = generateLicenseKey();
 
     const { error } = await supabase.from("licenses").insert([
-      { license_key, status: "ACTIVE", expires_at, hwid: null },
+      { license_key, status: "ACTIVE", expires_at }
     ]);
 
-    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true, license_key });
-  } catch {
-    return res.status(500).json({ success: false, error: "SERVER_ERROR" });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false });
   }
 });
 
-app.get("/admin/licenses", async (req, res) => {
-  try {
-    if (!requireAdmin(req, res)) return;
+/* ================= START SERVER ================= */
 
-    const { data, error } = await supabase
-      .from("licenses")
-      .select("*")
-      .order("created_at", { ascending: false });
+const PORT = process.env.PORT || 3000;
 
-    if (error) return res.status(500).json({ success: false, error: error.message });
-
-    return res.json({ success: true, data: data || [] });
-  } catch {
-    return res.status(500).json({ success: false, error: "SERVER_ERROR" });
-  }
+app.listen(PORT, () => {
+  console.log("GhostGuard backend running on port", PORT);
 });
-
-app.post("/admin/toggle-license", async (req, res) => {
-  try {
-    if (!requireAdmin(req, res)) return;
-
-    const { license_key, status } = req.body || {};
-    if (!license_key || !status) {
-      return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
-    }
-
-    const { error } = await supabase
-      .from("licenses")
-      .update({ status })
-      .eq("license_key", license_key);
-
-    if (error) return res.status(500).json({ success: false, error: error.message });
-
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ success: false, error: "SERVER_ERROR" });
-  }
-});
-
-app.post("/admin/create-customer", async (req, res) => {
-  try {
-    if (!requireAdmin(req, res)) return;
-
-    const { username, password, license_key } = req.body || {};
-    if (!username || !password || !license_key) {
-      return res.status(400).json({ success: false, error: "Missing fields" });
-    }
-
-    const hash = sha256(password);
-
-    const { error } = await supabase
-      .from("customers")
-      .insert([{
-        username,
-        password: hash,          // används för login
-        password_plain: password, // 🔥 TEST MODE
-        license_key
-      }]);
-
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ success: false, error: "SERVER_ERROR" });
-  }
-});
-
-
-/* ============================= */
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("GhostGuard backend running on", port));
