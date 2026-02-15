@@ -256,6 +256,47 @@ app.post("/admin/create-license", async (req, res) => {
   }
 });
 
+
+
+app.post("/admin/toggle-license", async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return;
+
+    const { license_key, status } = req.body;
+
+    if (!license_key || !status) {
+      return res.status(400).json({
+        success: false,
+        error: "MISSING_FIELDS"
+      });
+    }
+
+    const { error } = await supabase
+      .from("licenses")
+      .update({ status })
+      .eq("license_key", license_key);
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR"
+    });
+  }
+});
+
+
+
+
 /* ================= START SERVER ================= */
 
 const PORT = process.env.PORT || 3000;
