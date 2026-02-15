@@ -5,9 +5,17 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
-/* ================= CORS ================= */
+/* ================= CORS + JSON ================= */
 
-app.use(cors({ origin: true }));
+const corsOptions = {
+  origin: true,
+  credentials: false,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
 /* ================= SUPABASE ================= */
@@ -22,9 +30,10 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
 /* ================= MEMORY STORAGE ================= */
 
-// Allt sparas per license
-const servers = {}; // { license_key: { players, version, started_at, last_seen } }
-const serverLogs = {}; // { license_key: [logs] }
+const serverState = {};     // status per license
+const serverLogs = {};      // logs per license
+const livePlayers = {};     // players per license
+const banList = {};         // bans per license
 
 /* ================= HELPERS ================= */
 
@@ -33,7 +42,7 @@ function requireAdmin(req, res) {
   const token = bearer.startsWith("Bearer ") ? bearer.slice(7) : null;
 
   if (!ADMIN_SECRET || token !== ADMIN_SECRET) {
-    res.status(401).json({ success: false });
+    res.status(401).json({ success: false, error: "UNAUTHORIZED" });
     return false;
   }
   return true;
@@ -46,6 +55,13 @@ function generateLicenseKey() {
 
 function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
+}
+
+function pushServerLog(license_key, item) {
+  serverLogs[license_key] = serverLogs[license_key] || [];
+  serverLogs[license_key].unshift(item);
+  if (serverLogs[license_key].length > 300)
+    serverLogs[license_key].length = 300;
 }
 
 /* ================= ROOT ================= */
@@ -69,24 +85,19 @@ app.post("/api/license/verify", async (req, res) => {
       .single();
 
     if (!lic) return res.json({ valid: false });
-    if (lic.status !== "ACTIVE") return res.json({ valid: false });
+
+    if (lic.status !== "ACTIVE")
+      return res.json({ valid: false });
 
     if (lic.expires_at && new Date(lic.expires_at) < new Date())
       return res.json({ valid: false });
 
-    const payload = JSON.stringify({
-      license_key,
-      status: lic.status,
-      expires_at: lic.expires_at,
-      issued_at: Date.now()
-    });
+    await supabase
+      .from("licenses")
+      .update({ last_seen: new Date().toISOString() })
+      .eq("id", lic.id);
 
-    const signature = crypto
-      .createHmac("sha256", LICENSE_SECRET)
-      .update(payload)
-      .digest("hex");
-
-    return res.json({ valid: true, payload, signature });
+    return res.json({ valid: true });
 
   } catch (err) {
     console.error(err);
@@ -96,162 +107,127 @@ app.post("/api/license/verify", async (req, res) => {
 
 /* ================= SERVER HEARTBEAT ================= */
 
-app.post("/api/server/heartbeat", (req, res) => {
-  const { license_key, players, version } = req.body;
+app.post("/api/server/heartbeat", async (req, res) => {
+  try {
+    const { license_key, players, version, uptime } = req.body;
 
-  if (!license_key)
-    return res.status(400).json({ success: false });
+    if (!license_key)
+      return res.status(400).json({ success: false });
 
-  if (!servers[license_key]) {
-    servers[license_key] = {
-      players: [],
-      version: version || "3.0.0",
-      started_at: Date.now(),
-      last_seen: Date.now()
+    livePlayers[license_key] = players || [];
+
+    serverState[license_key] = {
+      players: (players || []).length,
+      version: version || "unknown",
+      uptime: uptime || 0,
+      last_seen: Date.now(),
     };
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false });
   }
-
-  const server = servers[license_key];
-
-  server.players = players || [];
-  server.version = version || server.version;
-  server.last_seen = Date.now();
-
-  return res.json({ success: true });
 });
 
 /* ================= SERVER STATUS ================= */
 
 app.get("/api/server/status/:license", (req, res) => {
-  const key = req.params.license;
-  const server = servers[key];
+  const license = req.params.license;
+  const data = serverState[license];
 
-  if (!server) return res.json({ online: false });
+  if (!data) return res.json({ online: false });
 
-  const online = (Date.now() - server.last_seen) < 30000;
-  const uptime = Math.floor((Date.now() - server.started_at) / 1000);
+  const online = (Date.now() - data.last_seen) < 30000;
 
   return res.json({
     online,
-    players: server.players.length,
-    version: server.version,
-    uptime
+    players: data.players,
+    uptime: data.uptime,
+    version: data.version,
   });
 });
 
-/* ================= SERVER PLAYERS ================= */
+/* ================= PLAYERS ================= */
 
 app.get("/api/server/players/:license", (req, res) => {
-  const key = req.params.license;
-  const server = servers[key];
-
+  const license = req.params.license;
   return res.json({
     success: true,
-    players: server ? server.players : []
+    players: livePlayers[license] || []
   });
+});
+
+/* ================= BANS ================= */
+
+app.get("/api/server/bans/:license", (req, res) => {
+  const license = req.params.license;
+  return res.json({
+    success: true,
+    bans: banList[license] || []
+  });
+});
+
+app.post("/api/server/ban", (req, res) => {
+  const { license_key, player } = req.body;
+  if (!license_key || !player)
+    return res.status(400).json({ success:false });
+
+  banList[license_key] = banList[license_key] || [];
+  banList[license_key].push({
+    player,
+    time: new Date().toISOString()
+  });
+
+  return res.json({ success:true });
 });
 
 /* ================= SERVER LOGS ================= */
 
-function pushLog(license_key, item) {
-  serverLogs[license_key] = serverLogs[license_key] || [];
-  serverLogs[license_key].unshift(item);
-  if (serverLogs[license_key].length > 300)
-    serverLogs[license_key].length = 300;
-}
-
 app.post("/api/server/log", (req, res) => {
-  const { license_key, type, message } = req.body || {};
+  const { license_key, message } = req.body;
   if (!license_key || !message)
-    return res.status(400).json({ success: false });
+    return res.status(400).json({ success:false });
 
-  pushLog(license_key, {
+  pushServerLog(license_key, {
     time: new Date().toISOString(),
-    type: type || "log",
     message
   });
 
-  return res.json({ success: true });
+  return res.json({ success:true });
 });
 
 app.get("/api/server/logs/:license", (req, res) => {
+  const license = req.params.license;
   return res.json({
     success: true,
-    data: serverLogs[req.params.license] || []
+    data: serverLogs[license] || []
   });
 });
 
-/* ================= LOGIN ================= */
+/* ================= ADMIN (UNTOUCHED) ================= */
 
-app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || !password)
-      return res.json({ success: false });
+app.post("/admin/create-license", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
 
-    const hash = sha256(password);
+  const days = Number(req.body?.days_valid || 0);
+  let expires_at = null;
 
-    const { data: user } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("username", username)
-      .eq("password", hash)
-      .single();
-
-    if (!user) return res.json({ success: false });
-
-    return res.json({
-      success: true,
-      license_key: user.license_key,
-      token: user.id
-    });
-
-  } catch {
-    return res.status(500).json({ success: false });
+  if (days > 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    expires_at = d.toISOString();
   }
+
+  const license_key = generateLicenseKey();
+
+  await supabase.from("licenses").insert([
+    { license_key, status: "ACTIVE", expires_at, hwid: null },
+  ]);
+
+  return res.json({ success: true, license_key });
 });
-
-/* ================= CUSTOMER ================= */
-
-app.post("/customer/dashboard", async (req, res) => {
-  try {
-    const { token } = req.body || {};
-    if (!token)
-      return res.status(401).json({ success: false });
-
-    const { data: user } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
-
-    if (!user)
-      return res.status(401).json({ success: false });
-
-    const { data: lic } = await supabase
-      .from("licenses")
-      .select("*")
-      .eq("license_key", user.license_key)
-      .single();
-
-    if (!lic)
-      return res.status(404).json({ success: false });
-
-    return res.json({
-      success: true,
-      data: {
-        license_key: lic.license_key,
-        status: lic.status,
-        expires_at: lic.expires_at
-      }
-    });
-
-  } catch {
-    return res.status(500).json({ success: false });
-  }
-});
-
-/* ================= ADMIN ================= */
 
 app.get("/admin/licenses", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -261,13 +237,24 @@ app.get("/admin/licenses", async (req, res) => {
     .select("*")
     .order("created_at", { ascending: false });
 
-  return res.json({ success: true, data });
+  return res.json({ success: true, data: data || [] });
+});
+
+app.post("/admin/toggle-license", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const { license_key, status } = req.body;
+  await supabase
+    .from("licenses")
+    .update({ status })
+    .eq("license_key", license_key);
+
+  return res.json({ success: true });
 });
 
 /* ================= START ================= */
 
 const port = process.env.PORT || 3000;
-
 app.listen(port, () =>
   console.log("GhostGuard backend running on", port)
 );
