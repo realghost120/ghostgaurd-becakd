@@ -100,6 +100,63 @@ app.post("/api/license/verify", async (req, res) => {
   }
 });
 
+
+
+
+// ===============================
+// ACTION QUEUE (Dashboard -> FiveM)
+// ===============================
+const actionQueue = {}; // { [license_key]: [ {id, type, payload, created_at} ] }
+
+function pushAction(license_key, action) {
+  actionQueue[license_key] = actionQueue[license_key] || [];
+  actionQueue[license_key].push(action);
+  // limit
+  if (actionQueue[license_key].length > 200) actionQueue[license_key].splice(0, 50);
+}
+
+// Dashboard: skapa action (auth via customer token)
+app.post("/api/dashboard/action", async (req, res) => {
+  try {
+    const { token, type, payload } = req.body || {};
+    if (!token || !type) return res.status(400).json({ success: false });
+
+    // token -> customer -> license_key
+    const { data: user, error: uErr } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (uErr || !user) return res.status(401).json({ success: false, error: "UNAUTHORIZED" });
+
+    const license_key = user.license_key;
+    const id = "ACT-" + Date.now() + "-" + Math.floor(Math.random() * 9999);
+
+    pushAction(license_key, {
+      id,
+      type,                // "kick" | "ban" | "dm" | "freeze"
+      payload: payload || {},
+      created_at: new Date().toISOString(),
+    });
+
+    return res.json({ success: true, id });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// FiveM: hämta actions (server poll)
+app.get("/api/server/actions/:license", (req, res) => {
+  const license_key = req.params.license;
+  const list = actionQueue[license_key] || [];
+  // töm queue när server hämtar
+  actionQueue[license_key] = [];
+  return res.json({ success: true, actions: list });
+});
+
+
 /* ================= LIVE MEMORY (status + players) ================= */
 const serverState = {}; // { [license_key]: { last_seen, players, uptime, version } }
 const livePlayersByLicense = {}; // { [license_key]: [{id,name,ping,identifiers?}] }
