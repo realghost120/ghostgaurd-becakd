@@ -70,25 +70,35 @@ app.get("/", (req, res) => res.send("GhostGuard Backend OK"));
 /* ========= PUBLIC API ======== */
 /* ============================= */
 
-app.post("/api/license/verify", async (req, res) => {
-  try {
-    const { license_key, hwid } = req.body || {};
-    if (!license_key) {
-      return res.status(400).json({ valid: false, reason: "MISSING_KEY" });
-    }
+local url = Config.BackendURL .. "/api/license/verify"
 
-    const { data: lic, error } = await supabase
-      .from("licenses")
-      .select("*")
-      .eq("license_key", license_key)
-      .single();
+local data = {
+    license_key = Config.LicenseKey,
+    hwid = "server-identifier-here"
+}
 
-    if (error || !lic) return res.json({ valid: false, reason: "NOT_FOUND" });
-    if (lic.status !== "ACTIVE") return res.json({ valid: false, reason: lic.status });
+PerformHttpRequest(url, function(err, text, headers)
+    print("HTTP Status:", err)
+    print("Response:", text)
 
-    if (lic.expires_at && new Date(lic.expires_at) < new Date()) {
-      return res.json({ valid: false, reason: "EXPIRED" });
-    }
+    if err ~= 200 then
+        print("[GhostGuard] License offline")
+        return
+    end
+
+    local response = json.decode(text)
+
+    if response and response.valid then
+        print("[GhostGuard] License: ACTIVE ✔")
+    else
+        print("[GhostGuard] License invalid:", response and response.reason or "UNKNOWN")
+        StopResource(GetCurrentResourceName())
+    end
+
+end, "POST", json.encode(data), {
+    ["Content-Type"] = "application/json"
+})
+
 
     // HWID bind
     if (lic.hwid) {
