@@ -5,9 +5,30 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 
-/* ================= CORS + JSON ================= */
+/* ================= CONFIG ================= */
+const PORT = process.env.PORT || 3000;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+const LICENSE_SECRET = process.env.LICENSE_SECRET || "change_me";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+
+// (valfritt) sätt din Netlify-domän här för striktare CORS
+// ex: https://ghostguard-panel.netlify.app
+const DASHBOARD_ORIGIN = process.env.DASHBOARD_ORIGIN || null;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("⚠️ Missing SUPABASE env vars. API will fail on DB calls.");
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+/* ================= MIDDLEWARE ================= */
+app.use(express.json({ limit: "2mb" }));
+
 const corsOptions = {
-  origin: true,
+  origin: DASHBOARD_ORIGIN ? [DASHBOARD_ORIGIN] : true,
   credentials: false,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -15,18 +36,12 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
-app.use(express.json());
-
-/* ================= SUPABASE ================= */
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const LICENSE_SECRET = process.env.LICENSE_SECRET || "change_me";
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
 /* ================= HELPERS ================= */
+function sha256(str) {
+  return crypto.createHash("sha256").update(str).digest("hex");
+}
+
 function requireAdmin(req, res) {
   const bearer = req.headers.authorization || "";
   const token = bearer.startsWith("Bearer ") ? bearer.slice(7) : null;
@@ -43,10 +58,6 @@ function generateLicenseKey() {
   return `GG-${part()}-${part()}`;
 }
 
-function sha256(str) {
-  return crypto.createHash("sha256").update(str).digest("hex");
-}
-
 /* ================= ROOT ================= */
 app.get("/", (req, res) => res.send("GhostGuard Backend OK"));
 app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
@@ -55,8 +66,7 @@ app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.post("/api/license/verify", async (req, res) => {
   try {
     const { license_key, hwid } = req.body || {};
-    if (!license_key)
-      return res.status(400).json({ valid: false, reason: "MISSING_KEY" });
+    if (!license_key) return res.status(400).json({ valid: false, reason: "MISSING_KEY" });
 
     const { data: lic, error } = await supabase
       .from("licenses")
@@ -66,20 +76,19 @@ app.post("/api/license/verify", async (req, res) => {
 
     if (error || !lic) return res.json({ valid: false, reason: "NOT_FOUND" });
     if (lic.status !== "ACTIVE") return res.json({ valid: false, reason: lic.status });
-    if (lic.expires_at && new Date(lic.expires_at) < new Date())
-      return res.json({ valid: false, reason: "EXPIRED" });
 
+    if (lic.expires_at && new Date(lic.expires_at) < new Date()) {
+      return res.json({ valid: false, reason: "EXPIRED" });
+    }
+
+    // HWID bind
     if (lic.hwid) {
-      if (hwid && lic.hwid !== hwid)
-        return res.json({ valid: false, reason: "HWID_MISMATCH" });
+      if (hwid && lic.hwid !== hwid) return res.json({ valid: false, reason: "HWID_MISMATCH" });
     } else if (hwid) {
       await supabase.from("licenses").update({ hwid }).eq("id", lic.id);
     }
 
-    await supabase
-      .from("licenses")
-      .update({ last_seen: new Date().toISOString() })
-      .eq("id", lic.id);
+    await supabase.from("licenses").update({ last_seen: new Date().toISOString() }).eq("id", lic.id);
 
     const payload = JSON.stringify({
       license_key,
@@ -88,87 +97,24 @@ app.post("/api/license/verify", async (req, res) => {
       issued_at: Date.now(),
     });
 
-    const signature = crypto
-      .createHmac("sha256", LICENSE_SECRET)
-      .update(payload)
-      .digest("hex");
+    const signature = crypto.createHmac("sha256", LICENSE_SECRET).update(payload).digest("hex");
 
     return res.json({ valid: true, payload, signature });
   } catch (err) {
-    console.error(err);
+    console.error("verify error:", err);
     return res.status(500).json({ valid: false, reason: "SERVER_ERROR" });
   }
 });
-
-
-
-
-// ===============================
-// ACTION QUEUE (Dashboard -> FiveM)
-// ===============================
-const actionQueue = {}; // { [license_key]: [ {id, type, payload, created_at} ] }
-
-function pushAction(license_key, action) {
-  actionQueue[license_key] = actionQueue[license_key] || [];
-  actionQueue[license_key].push(action);
-  // limit
-  if (actionQueue[license_key].length > 200) actionQueue[license_key].splice(0, 50);
-}
-
-// Dashboard: skapa action (auth via customer token)
-app.post("/api/dashboard/action", async (req, res) => {
-  try {
-    const { token, type, payload } = req.body || {};
-    if (!token || !type) return res.status(400).json({ success: false });
-
-    // token -> customer -> license_key
-    const { data: user, error: uErr } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
-
-    if (uErr || !user) return res.status(401).json({ success: false, error: "UNAUTHORIZED" });
-
-    const license_key = user.license_key;
-    const id = "ACT-" + Date.now() + "-" + Math.floor(Math.random() * 9999);
-
-    pushAction(license_key, {
-      id,
-      type,                // "kick" | "ban" | "dm" | "freeze"
-      payload: payload || {},
-      created_at: new Date().toISOString(),
-    });
-
-    return res.json({ success: true, id });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ success: false });
-  }
-});
-
-// FiveM: hämta actions (server poll)
-app.get("/api/server/actions/:license", (req, res) => {
-  const license_key = req.params.license;
-  const list = actionQueue[license_key] || [];
-  // töm queue när server hämtar
-  actionQueue[license_key] = [];
-  return res.json({ success: true, actions: list });
-});
-
 
 /* ================= LIVE MEMORY (status + players) ================= */
 const serverState = {}; // { [license_key]: { last_seen, players, uptime, version } }
 const livePlayersByLicense = {}; // { [license_key]: [{id,name,ping,identifiers?}] }
 
-/* ===== HEARTBEAT ENDPOINT =====
-   Din FiveM resource ska posta hit:
-   { license_key, players:[{id,name,ping}], uptime, version }
-*/
+/* ===== HEARTBEAT ===== */
 app.post("/api/server/heartbeat", async (req, res) => {
   try {
     const { license_key, players, version, uptime } = req.body || {};
-    if (!license_key) return res.status(400).json({ success: false });
+    if (!license_key) return res.status(400).json({ success: false, error: "MISSING_LICENSE" });
 
     livePlayersByLicense[license_key] = Array.isArray(players) ? players : [];
 
@@ -179,19 +125,23 @@ app.post("/api/server/heartbeat", async (req, res) => {
       version: version || null,
     };
 
-    // (valfritt) spara i Supabase om du vill
-    await supabase.from("server_status").upsert({
-      license_key,
-      online: true,
-      players: livePlayersByLicense[license_key].length,
-      version: version || null,
-      uptime: Number(uptime || 0),
-      last_seen: new Date().toISOString(),
-    });
+    // Optional: persist status
+    try {
+      await supabase.from("server_status").upsert({
+        license_key,
+        online: true,
+        players: livePlayersByLicense[license_key].length,
+        version: version || null,
+        uptime: Number(uptime || 0),
+        last_seen: new Date().toISOString(),
+      });
+    } catch (dbErr) {
+      // ignore if table missing
+    }
 
     return res.json({ success: true });
   } catch (e) {
-    console.error(e);
+    console.error("heartbeat error:", e);
     return res.status(500).json({ success: false });
   }
 });
@@ -218,8 +168,58 @@ app.get("/api/server/status/:license", (req, res) => {
   });
 });
 
-/* ================= LOG STORAGE IN MEMORY (per license) ================= */
-const serverLogs = {}; // { [license_key]: [{time,type,title,message,meta}] }
+/* ================= ACTION QUEUE (Dashboard -> FiveM poll) ================= */
+const actionQueue = {}; // { [license_key]: [ {id, type, payload, created_at} ] }
+
+function pushAction(license_key, action) {
+  actionQueue[license_key] = actionQueue[license_key] || [];
+  actionQueue[license_key].push(action);
+  if (actionQueue[license_key].length > 200) actionQueue[license_key].splice(0, 50);
+}
+
+// Dashboard: create action (auth via customer token = customers.id)
+app.post("/api/dashboard/action", async (req, res) => {
+  try {
+    const { token, type, payload } = req.body || {};
+    if (!token || !type) return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+
+    const { data: user, error: uErr } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("id", token)
+      .single();
+
+    if (uErr || !user) return res.status(401).json({ success: false, error: "UNAUTHORIZED" });
+
+    const license_key = user.license_key;
+    const id = "ACT-" + Date.now() + "-" + Math.floor(Math.random() * 9999);
+
+    pushAction(license_key, {
+      id,
+      type, // "kick" | "ban" | "dm" | "freeze"
+      payload: payload || {},
+      created_at: new Date().toISOString(),
+    });
+
+    return res.json({ success: true, id });
+  } catch (e) {
+    console.error("dashboard/action error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// FiveM: get actions (poll)
+// NOTE: clears queue after fetch
+app.get("/api/server/actions/:license", (req, res) => {
+  const license_key = req.params.license;
+  const list = actionQueue[license_key] || [];
+  actionQueue[license_key] = [];
+  return res.json({ success: true, actions: list });
+});
+
+/* ================= LOGS (Live + Persist) ================= */
+// In-memory logs for fast “live view”
+const serverLogs = {}; // { [license_key]: [{id,time,level,type,title,message,meta}] }
 
 function pushServerLog(license_key, item) {
   serverLogs[license_key] = serverLogs[license_key] || [];
@@ -227,29 +227,86 @@ function pushServerLog(license_key, item) {
   if (serverLogs[license_key].length > 300) serverLogs[license_key].length = 300;
 }
 
-app.post("/api/server/log", (req, res) => {
+// FiveM -> backend: send log
+// body: { license_key, level?, type?, title?, message, meta? }
+app.post("/api/server/log", async (req, res) => {
   try {
-    const { license_key, type, title, message, meta } = req.body || {};
-    if (!license_key || !message) return res.status(400).json({ success: false });
+    const { license_key, level, type, title, message, meta } = req.body || {};
+    if (!license_key || !message) {
+      return res.status(400).json({ success: false, error: "MISSING_LICENSE_OR_MESSAGE" });
+    }
 
-    pushServerLog(license_key, {
+    const item = {
+      id: "LOG-" + Date.now() + "-" + Math.floor(Math.random() * 9999),
       time: new Date().toISOString(),
+      level: level || "info",
       type: type || "log",
       title: title || "Server",
       message,
-      meta: meta || "",
-    });
+      meta: meta || null,
+    };
+
+    // 1) live memory
+    pushServerLog(license_key, item);
+
+    // 2) persist to Supabase if table exists (optional)
+    // Table suggestion: server_logs(license_key text, level text, type text, title text, message text, meta jsonb, created_at timestamp default now())
+    try {
+      await supabase.from("server_logs").insert([
+        {
+          license_key,
+          level: item.level,
+          type: item.type,
+          title: item.title,
+          message: item.message,
+          meta: item.meta,
+        },
+      ]);
+    } catch (dbErr) {
+      // ignore if missing table / RLS / etc.
+    }
 
     return res.json({ success: true });
   } catch (e) {
-    console.error(e);
+    console.error("server/log error:", e);
     return res.status(500).json({ success: false });
   }
 });
 
-app.get("/api/server/logs/:license", (req, res) => {
-  const license = req.params.license;
-  return res.json({ success: true, data: serverLogs[license] || [] });
+// Dashboard -> get logs
+// returns BOTH "data" and "logs" to prevent UI mismatch
+app.get("/api/server/logs/:license", async (req, res) => {
+  const license_key = req.params.license;
+  const limit = Math.min(parseInt(req.query.limit || "200", 10), 500);
+
+  // Prefer DB logs if available, fallback to memory
+  try {
+    const { data, error } = await supabase
+      .from("server_logs")
+      .select("id, license_key, level, type, title, message, meta, created_at")
+      .eq("license_key", license_key)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (!error && Array.isArray(data)) {
+      const mapped = data.map((x) => ({
+        id: x.id || ("DB-" + x.created_at),
+        time: x.created_at,
+        level: x.level || "info",
+        type: x.type || "log",
+        title: x.title || "Server",
+        message: x.message,
+        meta: x.meta ?? null,
+      }));
+
+      return res.json({ success: true, data: mapped, logs: mapped });
+    }
+  } catch (e) {
+    // ignore, fallback below
+  }
+
+  const mem = (serverLogs[license_key] || []).slice(0, limit);
+  return res.json({ success: true, data: mem, logs: mem });
 });
 
 /* ================= LOGIN ================= */
@@ -269,13 +326,9 @@ app.post("/api/login", async (req, res) => {
 
     if (error || !user) return res.json({ success: false });
 
-    return res.json({
-      success: true,
-      license_key: user.license_key,
-      token: user.id,
-    });
+    return res.json({ success: true, license_key: user.license_key, token: user.id });
   } catch (err) {
-    console.error(err);
+    console.error("login error:", err);
     return res.status(500).json({ success: false });
   }
 });
@@ -286,12 +339,7 @@ app.post("/customer/dashboard", async (req, res) => {
     const { token } = req.body || {};
     if (!token) return res.status(401).json({ success: false });
 
-    const { data: user } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
-
+    const { data: user } = await supabase.from("customers").select("*").eq("id", token).single();
     if (!user) return res.status(401).json({ success: false });
 
     const { data: lic } = await supabase
@@ -304,14 +352,10 @@ app.post("/customer/dashboard", async (req, res) => {
 
     return res.json({
       success: true,
-      data: {
-        license_key: lic.license_key,
-        status: lic.status,
-        expires_at: lic.expires_at,
-      },
+      data: { license_key: lic.license_key, status: lic.status, expires_at: lic.expires_at },
     });
   } catch (err) {
-    console.error(err);
+    console.error("customer/dashboard error:", err);
     return res.status(500).json({ success: false });
   }
 });
@@ -321,18 +365,13 @@ app.post("/customer/toggle", async (req, res) => {
     const { token, status } = req.body || {};
     if (!token || !status) return res.status(400).json({ success: false });
 
-    const { data: user } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
-
+    const { data: user } = await supabase.from("customers").select("*").eq("id", token).single();
     if (!user) return res.status(401).json({ success: false });
 
     await supabase.from("licenses").update({ status }).eq("license_key", user.license_key);
     return res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    console.error("customer/toggle error:", err);
     return res.status(500).json({ success: false });
   }
 });
@@ -352,13 +391,11 @@ app.post("/admin/create-license", async (req, res) => {
     }
 
     const license_key = generateLicenseKey();
-    await supabase.from("licenses").insert([
-      { license_key, status: "ACTIVE", expires_at, hwid: null },
-    ]);
+    await supabase.from("licenses").insert([{ license_key, status: "ACTIVE", expires_at, hwid: null }]);
 
     return res.json({ success: true, license_key });
   } catch (err) {
-    console.error(err);
+    console.error("admin/create-license error:", err);
     return res.status(500).json({ success: false });
   }
 });
@@ -367,14 +404,10 @@ app.get("/admin/licenses", async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return;
 
-    const { data } = await supabase
-      .from("licenses")
-      .select("*")
-      .order("created_at", { ascending: false });
-
+    const { data } = await supabase.from("licenses").select("*").order("created_at", { ascending: false });
     return res.json({ success: true, data: data || [] });
   } catch (err) {
-    console.error(err);
+    console.error("admin/licenses error:", err);
     return res.status(500).json({ success: false });
   }
 });
@@ -389,11 +422,10 @@ app.post("/admin/toggle-license", async (req, res) => {
     await supabase.from("licenses").update({ status }).eq("license_key", license_key);
     return res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    console.error("admin/toggle-license error:", err);
     return res.status(500).json({ success: false });
   }
 });
 
 /* ================= START ================= */
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("GhostGuard backend running on", port));
+app.listen(PORT, () => console.log("GhostGuard backend running on", PORT));
