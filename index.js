@@ -112,6 +112,57 @@ app.post("/api/license/verify", async (req, res) => {
   }
 });
 
+
+// ===== SERVER HEARTBEAT MEMORY =====
+const serverState = {};
+
+// ===== HEARTBEAT ENDPOINT =====
+app.post("/api/server/heartbeat", async (req, res) => {
+  try {
+    const { license_key, players, uptime, version } = req.body;
+
+    if (!license_key) {
+      return res.status(400).json({ success: false });
+    }
+
+    serverState[license_key] = {
+      players: players || 0,
+      uptime: uptime || 0,
+      version: version || "unknown",
+      last_seen: Date.now()
+    };
+
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.get("/api/server/status/:license", (req, res) => {
+  const license = req.params.license;
+  const data = serverState[license];
+
+  if (!data) {
+    return res.json({
+      online: false
+    });
+  }
+
+  const online = (Date.now() - data.last_seen) < 30000; // 30 sek timeout
+
+  return res.json({
+    online,
+    players: data.players,
+    uptime: data.uptime,
+    version: data.version,
+    last_seen: data.last_seen
+  });
+});
+
+
+
 /* ================= LOGIN ================= */
 
 app.post("/api/login", async (req, res) => {
