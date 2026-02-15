@@ -58,6 +58,56 @@ function generateLicenseKey() {
   return `GG-${part()}-${part()}`;
 }
 
+/* ================= NEW: PANEL ADMINS HELPERS ================= */
+// Generates a one-time invite token (we store only hash in DB)
+function randomToken(bytes = 24) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
+
+// Existing dashboard uses token in req.body (customers.id).
+async function requireCustomer(req, res) {
+  const token = req.body?.token || null;
+  if (!token) {
+    res.status(401).json({ success: false, error: "UNAUTHORIZED" });
+    return null;
+  }
+
+  const { data: user, error } = await supabase
+    .from("customers")
+    .select("*")
+    .eq("id", token)
+    .single();
+
+  if (error || !user) {
+    res.status(401).json({ success: false, error: "UNAUTHORIZED" });
+    return null;
+  }
+
+  return user;
+}
+
+// Allows both customers (token=customers.id) and panel admins (token=invite_token)
+async function resolvePanelIdentity(token) {
+  if (!token) return null;
+
+  // 1) customer session token (customers.id)
+  const { data: user } = await supabase.from("customers").select("*").eq("id", token).single();
+  if (user) return { kind: "customer", license_key: user.license_key, user };
+
+  // 2) panel admin invite token
+  const token_hash = sha256(token);
+  const { data: admin } = await supabase
+    .from("panel_admins")
+    .select("*")
+    .eq("token_hash", token_hash)
+    .eq("active", true)
+    .single();
+
+  if (admin) return { kind: "admin", license_key: admin.license_key, admin };
+
+  return null;
+}
+
 /* ================= ROOT ================= */
 app.get("/", (req, res) => res.send("GhostGuard Backend OK"));
 app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
@@ -177,21 +227,17 @@ function pushAction(license_key, action) {
   if (actionQueue[license_key].length > 200) actionQueue[license_key].splice(0, 50);
 }
 
-// Dashboard: create action (auth via customer token = customers.id)
+// Dashboard: create action (auth via token = customers.id OR panel admin invite token)
 app.post("/api/dashboard/action", async (req, res) => {
   try {
     const { token, type, payload } = req.body || {};
     if (!token || !type) return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
 
-    const { data: user, error: uErr } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("id", token)
-      .single();
+    // NEW: allow both customers and panel admins
+    const identity = await resolvePanelIdentity(token);
+    if (!identity) return res.status(401).json({ success: false, error: "UNAUTHORIZED" });
 
-    if (uErr || !user) return res.status(401).json({ success: false, error: "UNAUTHORIZED" });
-
-    const license_key = user.license_key;
+    const license_key = identity.license_key;
     const id = "ACT-" + Date.now() + "-" + Math.floor(Math.random() * 9999);
 
     pushAction(license_key, {
@@ -329,6 +375,155 @@ app.post("/api/login", async (req, res) => {
     return res.json({ success: true, license_key: user.license_key, token: user.id });
   } catch (err) {
     console.error("login error:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+/* ================= NEW: PANEL ADMINS ROUTES ================= */
+/**
+ * Required Supabase table (run in SQL editor):
+ *
+ * create table if not exists public.panel_admins (
+ *   id uuid primary key default gen_random_uuid(),
+ *   license_key text not null,
+ *   name text not null,
+ *   steam text,
+ *   discord text,
+ *   role text not null default 'admin',
+ *   active boolean not null default true,
+ *   token_hash text not null,
+ *   created_at timestamptz not null default now()
+ * );
+ * create index if not exists idx_panel_admins_license_key on public.panel_admins (license_key);
+ * create unique index if not exists uq_panel_admins_token_hash on public.panel_admins (token_hash);
+ */
+
+// Owner (customer) lists admins for their license
+app.post("/api/panel/admins/list", async (req, res) => {
+  try {
+    const user = await requireCustomer(req, res);
+    if (!user) return;
+
+    const { data, error } = await supabase
+      .from("panel_admins")
+      .select("id, name, steam, discord, role, active, created_at")
+      .eq("license_key", user.license_key)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ success: false, error: "DB_ERROR" });
+    return res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error("panel/admins/list error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// Owner (customer) adds an admin and receives invite_token ONCE
+app.post("/api/panel/admins/add", async (req, res) => {
+  try {
+    const user = await requireCustomer(req, res);
+    if (!user) return;
+
+    const { name, steam, discord, role } = req.body || {};
+    if (!name) return res.status(400).json({ success: false, error: "MISSING_NAME" });
+
+    const invite_token = randomToken(24);
+    const token_hash = sha256(invite_token);
+
+    const { data, error } = await supabase
+      .from("panel_admins")
+      .insert([
+        {
+          license_key: user.license_key,
+          name,
+          steam: steam || null,
+          discord: discord || null,
+          role: role || "admin",
+          active: true,
+          token_hash,
+        },
+      ])
+      .select("id, name, steam, discord, role, active, created_at")
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: "DB_ERROR" });
+
+    return res.json({ success: true, admin: data, invite_token });
+  } catch (e) {
+    console.error("panel/admins/add error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// Owner (customer) removes an admin
+app.post("/api/panel/admins/remove", async (req, res) => {
+  try {
+    const user = await requireCustomer(req, res);
+    if (!user) return;
+
+    const { id } = req.body || {};
+    if (!id) return res.status(400).json({ success: false, error: "MISSING_ID" });
+
+    const { error } = await supabase
+      .from("panel_admins")
+      .delete()
+      .eq("id", id)
+      .eq("license_key", user.license_key);
+
+    if (error) return res.status(500).json({ success: false, error: "DB_ERROR" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("panel/admins/remove error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// Owner (customer) toggles active
+app.post("/api/panel/admins/toggle", async (req, res) => {
+  try {
+    const user = await requireCustomer(req, res);
+    if (!user) return;
+
+    const { id, active } = req.body || {};
+    if (!id || typeof active !== "boolean") {
+      return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+    }
+
+    const { error } = await supabase
+      .from("panel_admins")
+      .update({ active })
+      .eq("id", id)
+      .eq("license_key", user.license_key);
+
+    if (error) return res.status(500).json({ success: false, error: "DB_ERROR" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("panel/admins/toggle error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// Panel admin login using invite_token
+app.post("/api/panel/admins/login", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ success: false });
+
+    const identity = await resolvePanelIdentity(token);
+    if (!identity || identity.kind !== "admin") return res.json({ success: false });
+
+    return res.json({
+      success: true,
+      license_key: identity.license_key,
+      admin: {
+        id: identity.admin.id,
+        name: identity.admin.name,
+        role: identity.admin.role,
+      },
+      token, // client stores same token
+    });
+  } catch (e) {
+    console.error("panel/admins/login error:", e);
     return res.status(500).json({ success: false });
   }
 });
