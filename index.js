@@ -162,6 +162,78 @@ app.get("/api/server/status/:license", (req, res) => {
 });
 
 
+// ===== LOG STORAGE IN MEMORY (per license) =====
+const serverLogs = {}; // { [license_key]: [{time,type,title,message,meta}] }
+
+function pushServerLog(license_key, item) {
+  serverLogs[license_key] = serverLogs[license_key] || [];
+  serverLogs[license_key].unshift(item);
+  // max 300 logs
+  if (serverLogs[license_key].length > 300) serverLogs[license_key].length = 300;
+}
+
+// POST: server skickar log
+app.post("/api/server/log", (req, res) => {
+  try {
+    const { license_key, type, title, message, meta } = req.body || {};
+    if (!license_key || !message) return res.status(400).json({ success: false });
+
+    pushServerLog(license_key, {
+      time: new Date().toISOString(),
+      type: type || "log",
+      title: title || "Server",
+      message,
+      meta: meta || ""
+    });
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// GET: dashboard hämtar logs
+app.get("/api/server/logs/:license", (req, res) => {
+  const license = req.params.license;
+  const list = serverLogs[license] || [];
+  return res.json({ success: true, data: list });
+});
+
+/* ============================= */
+/* ===== SERVER PLAYERS API ==== */
+/* ============================= */
+
+let livePlayers = [];
+
+/* FiveM heartbeat ska posta players hit */
+app.post("/api/server/heartbeat", async (req, res) => {
+  const { license_key, players, version } = req.body;
+
+  if (!license_key) return res.status(400).json({ success:false });
+
+  livePlayers = players || [];
+
+  await supabase
+    .from("server_status")
+    .upsert({
+      license_key,
+      online: true,
+      players: livePlayers.length,
+      version,
+      last_seen: new Date().toISOString()
+    });
+
+  return res.json({ success:true });
+});
+
+/* Dashboard hämtar live players */
+app.get("/api/server/players/:license", async (req, res) => {
+  return res.json({ success:true, players: livePlayers });
+});
+
+
+
 
 /* ================= LOGIN ================= */
 
