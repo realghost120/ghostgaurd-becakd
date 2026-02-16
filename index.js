@@ -622,5 +622,91 @@ app.post("/admin/toggle-license", async (req, res) => {
   }
 });
 
+/* ================= DETECTION SETTINGS ================= */
+
+// Ensure row exists for license
+async function ensureDetectionRow(license_key) {
+  const { data } = await supabase
+    .from("detection_settings")
+    .select("license_key")
+    .eq("license_key", license_key)
+    .single();
+
+  if (!data) {
+    await supabase.from("detection_settings").insert([{ license_key }]);
+  }
+}
+
+// GET detections (FiveM + Dashboard)
+app.get("/api/server/detections/:license", async (req, res) => {
+  try {
+    const license_key = req.params.license;
+    if (!license_key) return res.json({ success: false });
+
+    await ensureDetectionRow(license_key);
+
+    const { data, error } = await supabase
+      .from("detection_settings")
+      .select("*")
+      .eq("license_key", license_key)
+      .single();
+
+    if (error || !data) return res.json({ success: false });
+
+    return res.json({ success: true, settings: data });
+  } catch (e) {
+    console.error("detections GET error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// UPDATE detection (Dashboard toggle)
+app.post("/api/dashboard/detections", async (req, res) => {
+  try {
+    const { token, license_key, key, value } = req.body || {};
+    if (!token || !license_key || !key) {
+      return res.status(400).json({ success: false });
+    }
+
+    // allow both customers and panel admins
+    const identity = await resolvePanelIdentity(token);
+    if (!identity || identity.license_key !== license_key) {
+      return res.status(401).json({ success: false });
+    }
+
+    const allowedKeys = [
+      "noclip",
+      "speed",
+      "explosions",
+      "vehicleSpam",
+      "blacklistedVehicle",
+      "godmode"
+    ];
+
+    if (!allowedKeys.includes(key)) {
+      return res.status(400).json({ success: false });
+    }
+
+    await ensureDetectionRow(license_key);
+
+    const { error } = await supabase
+      .from("detection_settings")
+      .update({
+        [key]: Boolean(value),
+        updated_at: new Date().toISOString()
+      })
+      .eq("license_key", license_key);
+
+    if (error) return res.status(500).json({ success: false });
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("detections UPDATE error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+
+
 /* ================= START ================= */
 app.listen(PORT, () => console.log("GhostGuard backend running on", PORT));
