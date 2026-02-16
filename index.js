@@ -622,6 +622,56 @@ app.post("/admin/toggle-license", async (req, res) => {
   }
 });
 
+
+app.post("/admin/create-customer", async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return;
+
+    const { username, password, license_key } = req.body || {};
+
+    if (!username || !password || !license_key) {
+      return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+    }
+
+    // kolla att license finns
+    const { data: lic } = await supabase
+      .from("licenses")
+      .select("*")
+      .eq("license_key", license_key)
+      .single();
+
+    if (!lic) {
+      return res.status(404).json({ success: false, error: "LICENSE_NOT_FOUND" });
+    }
+
+    const password_hash = sha256(password);
+
+    const { data, error } = await supabase
+      .from("customers")
+      .insert([
+        {
+          username,
+          password: password_hash,
+          license_key,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("create-customer error:", error);
+      return res.status(500).json({ success: false, error: "DB_ERROR" });
+    }
+
+    return res.json({ success: true, customer: data });
+  } catch (err) {
+    console.error("admin/create-customer error:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+
+
 /* ================= DETECTION SETTINGS ================= */
 
 // Ensure row exists for license
