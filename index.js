@@ -3,6 +3,7 @@ import crypto from "crypto";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 
+
 const app = express();
 
 /* ================= CONFIG ================= */
@@ -13,6 +14,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const LICENSE_SECRET = process.env.LICENSE_SECRET || "change_me";
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+
 
 // (valfritt) sätt din Netlify-domän här för striktare CORS
 // ex: https://ghostguard-panel.netlify.app
@@ -756,24 +758,6 @@ app.post("/api/dashboard/detections", async (req, res) => {
   }
 });
 
-// SCRREENSHOT DISCORD WEBHOOK
-
-app.post("/api/upload-screenshot", upload.single("files[]"), async (req,res)=>{
-    const file = req.file;
-
-    // Skicka till Discord webhook
-    await axios.post(DISCORD_WEBHOOK_URL, {
-        content: "📸 Screenshot captured",
-    }, {
-        headers: { "Content-Type": "application/json" }
-    });
-
-    await axios.post(DISCORD_WEBHOOK_URL, {
-        file: fs.createReadStream(file.path)
-    });
-
-    res.json({success:true});
-});
 
 
 
