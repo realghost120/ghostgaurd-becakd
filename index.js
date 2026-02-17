@@ -756,6 +756,26 @@ app.post("/api/dashboard/detections", async (req, res) => {
   }
 });
 
+// SCRREENSHOT DISCORD WEBHOOK
+
+app.post("/api/upload-screenshot", upload.single("files[]"), async (req,res)=>{
+    const file = req.file;
+
+    // Skicka till Discord webhook
+    await axios.post(DISCORD_WEBHOOK_URL, {
+        content: "📸 Screenshot captured",
+    }, {
+        headers: { "Content-Type": "application/json" }
+    });
+
+    await axios.post(DISCORD_WEBHOOK_URL, {
+        file: fs.createReadStream(file.path)
+    });
+
+    res.json({success:true});
+});
+
+
 
 
 /* ================= START ================= */
