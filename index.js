@@ -829,6 +829,13 @@ app.post("/api/dashboard/detections", async (req, res) => {
 });
 
 
+app.get("/version", (req, res) => {
+  res.json({
+    version: "3.1.0",
+    download: "https://ghostguard.com/download",
+    notes: "Stability improvements & detection optimizations"
+  });
+});
 
 
 
