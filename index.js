@@ -204,25 +204,27 @@ app.get("/api/server/bans/:license", async (req,res)=>{
   }
 });
 
-app.delete("/api/server/ban/:ban_id", async (req, res) => {
+app.delete("/api/server/unban/:banId", async (req, res) => {
   try {
-    const { ban_id } = req.params;
+    const { banId } = req.params;
 
-    if (!ban_id) {
-      return res.status(400).json({ success: false });
-    }
-
-    await supabase
+    const { error } = await supabase
       .from("bans")
       .delete()
-      .eq("ban_id", ban_id);
+      .eq("ban_id", banId);
+
+    if (error) {
+      console.log("UNBAN ERROR:", error);
+      return res.status(500).json({ success: false });
+    }
 
     return res.json({ success: true });
   } catch (e) {
-    console.error("unban error:", e);
+    console.log("UNBAN CATCH:", e);
     return res.status(500).json({ success: false });
   }
 });
+
 
 
 
