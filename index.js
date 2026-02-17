@@ -204,6 +204,27 @@ app.get("/api/server/bans/:license", async (req,res)=>{
   }
 });
 
+app.delete("/api/server/ban/:ban_id", async (req, res) => {
+  try {
+    const { ban_id } = req.params;
+
+    if (!ban_id) {
+      return res.status(400).json({ success: false });
+    }
+
+    await supabase
+      .from("bans")
+      .delete()
+      .eq("ban_id", ban_id);
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("unban error:", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+
 
 /* ================= LIVE MEMORY (status + players) ================= */
 const serverState = {}; // { [license_key]: { last_seen, players, uptime, version } }
