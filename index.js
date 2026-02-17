@@ -158,6 +158,53 @@ app.post("/api/license/verify", async (req, res) => {
   }
 });
 
+
+
+/* ================= BANS ================= */
+
+app.post("/api/server/ban", async (req,res)=>{
+  try{
+    const { license_key, player, reason, duration } = req.body || {};
+    if(!license_key || !player) {
+      return res.status(400).json({success:false});
+    }
+
+    const ban_id = "GG-" + Date.now();
+
+    await supabase.from("bans").insert([{
+      license_key,
+      player_id: player,
+      reason: reason || "No reason",
+      duration: duration || "P",
+      ban_id,
+      created_at: new Date().toISOString()
+    }]);
+
+    res.json({success:true, ban_id});
+  }catch(e){
+    console.log(e);
+    res.status(500).json({success:false});
+  }
+});
+
+
+
+
+app.get("/api/server/bans/:license", async (req,res)=>{
+  try{
+    const { data } = await supabase
+      .from("bans")
+      .select("*")
+      .eq("license_key", req.params.license)
+      .order("created_at", {ascending:false});
+
+    res.json({success:true, data});
+  }catch(e){
+    res.status(500).json({success:false});
+  }
+});
+
+
 /* ================= LIVE MEMORY (status + players) ================= */
 const serverState = {}; // { [license_key]: { last_seen, players, uptime, version } }
 const livePlayersByLicense = {}; // { [license_key]: [{id,name,ping,identifiers?}] }
