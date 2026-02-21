@@ -208,29 +208,24 @@ app.delete("/api/server/unban/:banId", async (req, res) => {
   try {
     const { banId } = req.params;
 
-    // 1️⃣ Hämta ban först (så vi vet license_key)
-    const { data: ban, error: findErr } = await supabase
+    // 1️⃣ Hämta ban så vi vet license_key
+    const { data: ban } = await supabase
       .from("bans")
       .select("*")
       .eq("ban_id", banId)
       .single();
 
-    if (findErr || !ban) {
-      return res.status(404).json({ success: false });
+    if (!ban) {
+      return res.json({ success: false });
     }
 
-    // 2️⃣ Ta bort från DB
-    const { error } = await supabase
+    // 2️⃣ Ta bort ban från DB
+    await supabase
       .from("bans")
       .delete()
       .eq("ban_id", banId);
 
-    if (error) {
-      console.log("UNBAN ERROR:", error);
-      return res.status(500).json({ success: false });
-    }
-
-    // 3️⃣ SKICKA ACTION TILL FiveM (DETTA VAR DET SOM SAKNADES)
+    // 3️⃣ SKICKA action till FiveM-servern
     pushAction(ban.license_key, {
       id: "ACT-" + Date.now(),
       type: "unban",
@@ -241,8 +236,9 @@ app.delete("/api/server/unban/:banId", async (req, res) => {
     });
 
     return res.json({ success: true });
+
   } catch (e) {
-    console.log("UNBAN CATCH:", e);
+    console.log("UNBAN ERROR:", e);
     return res.status(500).json({ success: false });
   }
 });
